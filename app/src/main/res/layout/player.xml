@@ -28,6 +28,22 @@
         android:layout_centerInParent="true"
         android:layout_gravity="center"/>
 
+    <View
+        android:id="@+id/playerTopShadow"
+        android:layout_width="match_parent"
+        android:layout_height="30dp"
+        android:background="@drawable/player_controls_top_background"
+        android:layout_alignParentTop="true"
+        android:visibility="gone"/>
+
+    <View
+        android:id="@+id/playerBottomShadow"
+        android:layout_width="match_parent"
+        android:layout_height="30dp"
+        android:background="@drawable/player_controls_background"
+        android:layout_alignParentBottom="true"
+        android:visibility="gone"/>
+
     <ImageView
         android:id="@+id/endScreen"
         android:layout_width="match_parent"
@@ -42,28 +58,16 @@
         android:id="@+id/playbackControlRoot"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
+        android:fitsSystemWindows="true"
         android:background="@color/video_overlay_color"
         android:visibility="gone"
         tools:visibility="visible">
-
-        <View
-            android:layout_width="match_parent"
-            android:layout_height="30dp"
-            android:background="@drawable/player_controls_top_background"
-            android:layout_alignParentTop="true" />
-
-        <View
-            android:layout_width="match_parent"
-            android:layout_height="30dp"
-            android:background="@drawable/player_controls_background"
-            android:layout_alignParentBottom="true" />
 
         <!-- All top controls in this layout -->
         <RelativeLayout
             android:id="@+id/playbackWindowRoot"
             android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:fitsSystemWindows="true">
+            android:layout_height="match_parent">
 
             <LinearLayout
                 android:id="@+id/topControls"
@@ -352,10 +356,10 @@
                     android:id="@+id/playbackSeekBar"
                     style="@style/Widget.AppCompat.SeekBar"
                     android:layout_width="0dp"
-                    android:layout_height="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="center"
                     android:layout_weight="1"
-                    android:paddingBottom="4dp"
-                    android:paddingTop="8dp"
+                    android:layout_marginTop="2dp"
                     tools:progress="25"
                     tools:secondaryProgress="50"/>
 
