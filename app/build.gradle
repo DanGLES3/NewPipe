@@ -49,7 +49,8 @@ android {
         // debug build. This seems to be a Gradle bug, therefore
         // TODO: update Gradle version
         release {
-            minifyEnabled true
+            minifyEnabled false
+            multiDexEnabled true
             shrinkResources false // disabled to fix F-Droid's reproducible build
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
             archivesBaseName = 'app'
