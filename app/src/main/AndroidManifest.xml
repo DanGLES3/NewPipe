@@ -44,9 +44,8 @@
         </receiver>
 
         <service
-            android:name=".player.MainPlayer"
-            android:exported="false"
-            android:foregroundServiceType="mediaPlayback">
+                android:name=".player.MainPlayer"
+                android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.MEDIA_BUTTON" />
             </intent-filter>

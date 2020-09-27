@@ -55,7 +55,6 @@ import android.widget.ProgressBar;
 import android.widget.RelativeLayout;
 import android.widget.SeekBar;
 import android.widget.TextView;
-
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
@@ -65,7 +64,6 @@ import androidx.recyclerview.widget.RecyclerView;
 import com.google.android.exoplayer2.ExoPlaybackException;
 import com.google.android.exoplayer2.Player;
 import com.google.android.exoplayer2.SimpleExoPlayer;
-import com.google.android.exoplayer2.Timeline;
 import com.google.android.exoplayer2.source.MediaSource;
 import com.google.android.exoplayer2.text.CaptionStyleCompat;
 import com.google.android.exoplayer2.ui.AspectRatioFrameLayout;
@@ -110,10 +108,10 @@ import static org.schabi.newpipe.player.MainPlayer.ACTION_OPEN_CONTROLS;
 import static org.schabi.newpipe.player.MainPlayer.ACTION_PLAY_NEXT;
 import static org.schabi.newpipe.player.MainPlayer.ACTION_PLAY_PAUSE;
 import static org.schabi.newpipe.player.MainPlayer.ACTION_PLAY_PREVIOUS;
-import static org.schabi.newpipe.player.MainPlayer.ACTION_RECREATE_NOTIFICATION;
 import static org.schabi.newpipe.player.MainPlayer.ACTION_REPEAT;
-import static org.schabi.newpipe.player.MainPlayer.ACTION_SHUFFLE;
+import static org.schabi.newpipe.player.MainPlayer.NOTIFICATION_ID;
 import static org.schabi.newpipe.player.helper.PlayerHelper.MinimizeMode.MINIMIZE_ON_EXIT_MODE_BACKGROUND;
+import static org.schabi.newpipe.player.helper.PlayerHelper.getTimeString;
 import static org.schabi.newpipe.util.AnimationUtils.Type.SLIDE_AND_ALPHA;
 import static org.schabi.newpipe.util.AnimationUtils.animateRotation;
 import static org.schabi.newpipe.util.AnimationUtils.animateView;
@@ -143,6 +141,7 @@ public class VideoPlayerImpl extends VideoPlayer
             | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
 
     private static final float MAX_GESTURE_LENGTH = 0.75f;
+    private static final int NOTIFICATION_UPDATES_BEFORE_RESET = 60;
 
     private TextView titleTextView;
     private TextView channelTextView;
@@ -188,6 +187,7 @@ public class VideoPlayerImpl extends VideoPlayer
     private boolean isVerticalVideo = false;
     private boolean fragmentIsVisible = false;
     boolean shouldUpdateOnProgress;
+    int timesNotificationUpdated;
 
     private final MainPlayer service;
     private PlayerServiceEventListener fragmentListener;
@@ -197,6 +197,9 @@ public class VideoPlayerImpl extends VideoPlayer
     private ContentObserver settingsContentObserver;
     @NonNull
     private final AudioPlaybackResolver resolver;
+
+    private int cachedDuration;
+    private String cachedDurationString;
 
     // Popup
     private WindowManager.LayoutParams popupLayoutParams;
@@ -575,32 +578,29 @@ public class VideoPlayerImpl extends VideoPlayer
         setupScreenRotationButton();
     }
 
-    /*//////////////////////////////////////////////////////////////////////////
-    // ExoPlayer Video Listener
-    //////////////////////////////////////////////////////////////////////////*/
-
-    void onShuffleOrRepeatModeChanged() {
-        updatePlaybackButtons();
-        updatePlayback();
-        NotificationUtil.getInstance().createNotificationIfNeededAndUpdate(this, false);
-    }
+        /*//////////////////////////////////////////////////////////////////////////
+        // ExoPlayer Video Listener
+        //////////////////////////////////////////////////////////////////////////*/
 
     @Override
     public void onRepeatModeChanged(final int i) {
         super.onRepeatModeChanged(i);
-        onShuffleOrRepeatModeChanged();
+        updatePlaybackButtons();
+        updatePlayback();
+        service.resetNotification();
+        service.updateNotification(-1);
     }
 
     @Override
     public void onShuffleClicked() {
         super.onShuffleClicked();
-        onShuffleOrRepeatModeChanged();
-
+        updatePlaybackButtons();
+        updatePlayback();
     }
 
-    /*//////////////////////////////////////////////////////////////////////////
-    // Playback Listener
-    //////////////////////////////////////////////////////////////////////////*/
+        /*//////////////////////////////////////////////////////////////////////////
+        // Playback Listener
+        //////////////////////////////////////////////////////////////////////////*/
 
     @Override
     public void onPlayerError(final ExoPlaybackException error) {
@@ -611,13 +611,6 @@ public class VideoPlayerImpl extends VideoPlayer
         }
     }
 
-    @Override
-    public void onTimelineChanged(final Timeline timeline, final int reason) {
-        super.onTimelineChanged(timeline, reason);
-        // force recreate notification to ensure seek bar is shown when preparation finishes
-        NotificationUtil.getInstance().createNotificationIfNeededAndUpdate(this, true);
-    }
-
     protected void onMetadataChanged(@NonNull final MediaSourceTag tag) {
         super.onMetadataChanged(tag);
 
@@ -626,7 +619,8 @@ public class VideoPlayerImpl extends VideoPlayer
         titleTextView.setText(tag.getMetadata().getName());
         channelTextView.setText(tag.getMetadata().getUploaderName());
 
-        NotificationUtil.getInstance().createNotificationIfNeededAndUpdate(this, false);
+        service.resetNotification();
+        service.updateNotification(-1);
         updateMetadata();
     }
 
@@ -649,17 +643,35 @@ public class VideoPlayerImpl extends VideoPlayer
     public void onUpdateProgress(final int currentProgress,
                                  final int duration, final int bufferPercent) {
         super.onUpdateProgress(currentProgress, duration, bufferPercent);
+
         updateProgress(currentProgress, duration, bufferPercent);
 
-        // setMetadata only updates the metadata when any of the metadata keys are null
-        mediaSessionManager.setMetadata(getVideoTitle(), getUploaderName(), getThumbnail(),
-                duration);
-    }
+        if (!shouldUpdateOnProgress || getCurrentState() == BasePlayer.STATE_COMPLETED
+                || getCurrentState() == BasePlayer.STATE_PAUSED || getPlayQueue() == null) {
+            return;
+        }
 
-    @Override
-    public void onPlayQueueEdited() {
-        updatePlayback();
-        NotificationUtil.getInstance().createNotificationIfNeededAndUpdate(this, false);
+        if (timesNotificationUpdated > NOTIFICATION_UPDATES_BEFORE_RESET) {
+            service.resetNotification();
+        }
+
+        if (service.getBigNotRemoteView() != null) {
+            if (cachedDuration != duration) {
+                cachedDuration = duration;
+                cachedDurationString = getTimeString(duration);
+            }
+            service.getBigNotRemoteView()
+                    .setProgressBar(R.id.notificationProgressBar,
+                            duration, currentProgress, false);
+            service.getBigNotRemoteView()
+                    .setTextViewText(R.id.notificationTime,
+                            getTimeString(currentProgress) + " / " + cachedDurationString);
+        }
+        if (service.getNotRemoteView() != null) {
+            service.getNotRemoteView()
+                    .setProgressBar(R.id.notificationProgressBar, duration, currentProgress, false);
+        }
+        service.updateNotification(-1);
     }
 
     @Override
@@ -1089,7 +1101,8 @@ public class VideoPlayerImpl extends VideoPlayer
         animatePlayButtons(false, 100);
         getRootView().setKeepScreenOn(false);
 
-        NotificationUtil.getInstance().createNotificationIfNeededAndUpdate(this, false);
+        service.resetNotification();
+        service.updateNotification(R.drawable.exo_controls_play);
     }
 
     @Override
@@ -1097,9 +1110,8 @@ public class VideoPlayerImpl extends VideoPlayer
         super.onBuffering();
         getRootView().setKeepScreenOn(true);
 
-        if (NotificationUtil.getInstance().shouldUpdateBufferingSlot()) {
-            NotificationUtil.getInstance().createNotificationIfNeededAndUpdate(this, false);
-        }
+        service.resetNotification();
+        service.updateNotification(R.drawable.exo_controls_play);
     }
 
     @Override
@@ -1117,7 +1129,10 @@ public class VideoPlayerImpl extends VideoPlayer
         checkLandscape();
         getRootView().setKeepScreenOn(true);
 
-        NotificationUtil.getInstance().createNotificationIfNeededAndUpdate(this, false);
+        service.resetNotification();
+        service.updateNotification(R.drawable.exo_controls_pause);
+
+        service.startForeground(NOTIFICATION_ID, service.getNotBuilder().build());
     }
 
     @Override
@@ -1133,12 +1148,13 @@ public class VideoPlayerImpl extends VideoPlayer
 
         updateWindowFlags(IDLE_WINDOW_FLAGS);
 
+        service.resetNotification();
+        service.updateNotification(R.drawable.exo_controls_play);
+
         // Remove running notification when user don't want music (or video in popup)
         // to be played in background
         if (!minimizeOnPopupEnabled() && !backgroundPlaybackEnabled() && videoPlayerSelected()) {
-            NotificationUtil.getInstance().cancelNotificationAndStopForeground(service);
-        } else {
-            NotificationUtil.getInstance().createNotificationIfNeededAndUpdate(this, false);
+            service.stopForeground(true);
         }
 
         getRootView().setKeepScreenOn(false);
@@ -1150,7 +1166,8 @@ public class VideoPlayerImpl extends VideoPlayer
         animatePlayButtons(false, 100);
         getRootView().setKeepScreenOn(true);
 
-        NotificationUtil.getInstance().createNotificationIfNeededAndUpdate(this, false);
+        service.resetNotification();
+        service.updateNotification(R.drawable.exo_controls_play);
     }
 
 
@@ -1160,17 +1177,20 @@ public class VideoPlayerImpl extends VideoPlayer
             playPauseButton.setImageResource(R.drawable.ic_replay_white_24dp);
             animatePlayButtons(true, DEFAULT_CONTROLS_DURATION);
         });
-
         getRootView().setKeepScreenOn(false);
+
         updateWindowFlags(IDLE_WINDOW_FLAGS);
 
-        NotificationUtil.getInstance().createNotificationIfNeededAndUpdate(this, false);
+        service.resetNotification();
+        service.updateNotification(R.drawable.ic_replay_white_24dp);
+
         super.onCompleted();
     }
 
     @Override
     public void destroy() {
         super.destroy();
+
         service.getContentResolver().unregisterContentObserver(settingsContentObserver);
     }
 
@@ -1194,8 +1214,6 @@ public class VideoPlayerImpl extends VideoPlayer
         intentFilter.addAction(ACTION_PLAY_NEXT);
         intentFilter.addAction(ACTION_FAST_REWIND);
         intentFilter.addAction(ACTION_FAST_FORWARD);
-        intentFilter.addAction(ACTION_SHUFFLE);
-        intentFilter.addAction(ACTION_RECREATE_NOTIFICATION);
 
         intentFilter.addAction(VideoDetailFragment.ACTION_VIDEO_FRAGMENT_RESUMED);
         intentFilter.addAction(VideoDetailFragment.ACTION_VIDEO_FRAGMENT_STOPPED);
@@ -1245,17 +1263,6 @@ public class VideoPlayerImpl extends VideoPlayer
             case ACTION_REPEAT:
                 onRepeatClicked();
                 break;
-            case ACTION_SHUFFLE:
-                onShuffleClicked();
-                break;
-            case ACTION_RECREATE_NOTIFICATION:
-                NotificationUtil.getInstance().createNotificationIfNeededAndUpdate(this, true);
-                break;
-            case Intent.ACTION_HEADSET_PLUG: //FIXME
-                /*notificationManager.cancel(NOTIFICATION_ID);
-                mediaSessionManager.dispose();
-                mediaSessionManager.enable(getBaseContext(), basePlayerImpl.simpleExoPlayer);*/
-                break;
             case VideoDetailFragment.ACTION_VIDEO_FRAGMENT_RESUMED:
                 fragmentIsVisible = true;
                 useVideoSource(true);
@@ -1295,6 +1302,7 @@ public class VideoPlayerImpl extends VideoPlayer
                 }
                 break;
         }
+        service.resetNotification();
     }
 
     /*//////////////////////////////////////////////////////////////////////////
@@ -1306,7 +1314,10 @@ public class VideoPlayerImpl extends VideoPlayer
                                   final View view,
                                   final Bitmap loadedImage) {
         super.onLoadingComplete(imageUri, view, loadedImage);
-        NotificationUtil.getInstance().createNotificationIfNeededAndUpdate(this, false);
+        // rebuild notification here since remote view does not release bitmaps,
+        // causing memory leaks
+        service.resetNotification();
+        service.updateNotification(-1);
     }
 
     @Override
@@ -1314,18 +1325,20 @@ public class VideoPlayerImpl extends VideoPlayer
                                 final View view,
                                 final FailReason failReason) {
         super.onLoadingFailed(imageUri, view, failReason);
-        NotificationUtil.getInstance().createNotificationIfNeededAndUpdate(this, false);
+        service.resetNotification();
+        service.updateNotification(-1);
     }
 
     @Override
     public void onLoadingCancelled(final String imageUri, final View view) {
         super.onLoadingCancelled(imageUri, view);
-        NotificationUtil.getInstance().createNotificationIfNeededAndUpdate(this, false);
+        service.resetNotification();
+        service.updateNotification(-1);
     }
 
-    /*//////////////////////////////////////////////////////////////////////////
-    // Utils
-    //////////////////////////////////////////////////////////////////////////*/
+        /*//////////////////////////////////////////////////////////////////////////
+        // Utils
+        //////////////////////////////////////////////////////////////////////////*/
 
     private void setInitialGestureValues() {
         if (getAudioReactor() != null) {

@@ -22,7 +22,9 @@ import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.appcompat.app.ActionBar;
 import androidx.appcompat.app.AlertDialog;
+import androidx.appcompat.app.AppCompatActivity;
 import androidx.appcompat.content.res.AppCompatResources;
 import androidx.appcompat.widget.AppCompatImageView;
 import androidx.fragment.app.Fragment;
@@ -115,8 +117,7 @@ public class PeertubeInstanceListFragment extends Fragment {
     @Override
     public void onResume() {
         super.onResume();
-        ThemeHelper.setTitleToAppCompatActivity(getActivity(),
-                getString(R.string.peertube_instance_url_title));
+        updateTitle();
     }
 
     @Override
@@ -173,6 +174,15 @@ public class PeertubeInstanceListFragment extends Fragment {
     private void selectInstance(final PeertubeInstance instance) {
         selectedInstance = PeertubeHelper.selectInstance(instance, requireContext());
         sharedPreferences.edit().putBoolean(Constants.KEY_MAIN_PAGE_CHANGE, true).apply();
+    }
+
+    private void updateTitle() {
+        if (getActivity() instanceof AppCompatActivity) {
+            final ActionBar actionBar = ((AppCompatActivity) getActivity()).getSupportActionBar();
+            if (actionBar != null) {
+                actionBar.setTitle(R.string.peertube_instance_url_title);
+            }
+        }
     }
 
     private void saveChanges() {
