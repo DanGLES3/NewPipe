@@ -39,13 +39,12 @@ public class CustomBottomSheetBehavior extends BottomSheetBehavior<FrameLayout> 
         }
 
         // Found that user still swiping, continue following
-        if (skippingInterception || getState() == BottomSheetBehavior.STATE_SETTLING) {
+        if (skippingInterception) {
             return false;
         }
 
         // Don't need to do anything if bottomSheet isn't expanded
-        if (getState() == BottomSheetBehavior.STATE_EXPANDED
-                && event.getAction() == MotionEvent.ACTION_DOWN) {
+        if (getState() == BottomSheetBehavior.STATE_EXPANDED) {
             // Without overriding scrolling will not work when user touches these elements
             for (final Integer element : skipInterceptionOfElements) {
                 final ViewGroup viewGroup = child.findViewById(element);

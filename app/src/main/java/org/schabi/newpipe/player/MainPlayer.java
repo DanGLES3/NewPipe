@@ -171,7 +171,6 @@ public final class MainPlayer extends Service {
             // Android TV will handle back button in case controls will be visible
             // (one more additional unneeded click while the player is hidden)
             playerImpl.hideControls(0, 0);
-            playerImpl.onQueueClosed();
             // Notification shows information about old stream but if a user selects
             // a stream from backStack it's not actual anymore
             // So we should hide the notification at all.
@@ -220,10 +219,6 @@ public final class MainPlayer extends Service {
         }
 
         if (playerImpl != null) {
-            // Exit from fullscreen when user closes the player via notification
-            if (playerImpl.isFullscreen()) {
-                playerImpl.toggleFullscreen();
-            }
             removeViewFromParent();
 
             playerImpl.setRecovery();

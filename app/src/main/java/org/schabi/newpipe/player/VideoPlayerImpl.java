@@ -27,21 +27,22 @@ import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.database.ContentObserver;
 import android.graphics.Bitmap;
-import android.graphics.Color;
 import android.graphics.PixelFormat;
+import android.graphics.Point;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
-import android.view.DisplayCutout;
 import androidx.preference.PreferenceManager;
 import android.provider.Settings;
 import android.util.DisplayMetrics;
 import android.util.Log;
 import android.util.TypedValue;
+import android.view.Display;
 import android.view.GestureDetector;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
+import android.view.Surface;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
@@ -101,6 +102,7 @@ import org.schabi.newpipe.util.ShareUtils;
 import java.util.List;
 
 import static android.content.Context.WINDOW_SERVICE;
+import static android.content.res.Configuration.ORIENTATION_LANDSCAPE;
 import static org.schabi.newpipe.player.MainPlayer.ACTION_CLOSE;
 import static org.schabi.newpipe.player.MainPlayer.ACTION_FAST_FORWARD;
 import static org.schabi.newpipe.player.MainPlayer.ACTION_FAST_REWIND;
@@ -255,7 +257,6 @@ public class VideoPlayerImpl extends VideoPlayer
         } else {
             getRootView().setVisibility(View.VISIBLE);
             initVideoPlayer();
-            onQueueClosed();
             // Android TV: without it focus will frame the whole player
             playPauseButton.requestFocus();
         }
@@ -336,6 +337,7 @@ public class VideoPlayerImpl extends VideoPlayer
      * This method ensures that popup and main players have different look.
      * We use one layout for both players and need to decide what to show and what to hide.
      * Additional measuring should be done inside {@link #setupElementsSize}.
+     * {@link #setControlsSize} is used to adapt the UI to fullscreen mode, multiWindow, navBar, etc
      */
     private void setupElementsVisibility() {
         if (popupPlayerSelected()) {
@@ -470,17 +472,6 @@ public class VideoPlayerImpl extends VideoPlayer
                 Settings.System.getUriFor(Settings.System.ACCELEROMETER_ROTATION), false,
                 settingsContentObserver);
         getRootView().addOnLayoutChangeListener(this);
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            queueLayout.setOnApplyWindowInsetsListener((view, windowInsets) -> {
-                final DisplayCutout cutout = windowInsets.getDisplayCutout();
-                if (cutout != null) {
-                    view.setPadding(cutout.getSafeInsetLeft(), cutout.getSafeInsetTop(),
-                            cutout.getSafeInsetRight(), cutout.getSafeInsetBottom());
-                }
-                return windowInsets;
-            });
-        }
     }
 
     public boolean onKeyDown(final int keyCode) {
@@ -753,16 +744,7 @@ public class VideoPlayerImpl extends VideoPlayer
             }
 
             isFullscreen = !isFullscreen;
-            if (!isFullscreen) {
-                // Apply window insets because Android will not do it when orientation changes
-                // from landscape to portrait (open vertical video to reproduce)
-                getControlsRoot().setPadding(0, 0, 0, 0);
-            } else {
-                // Android needs tens milliseconds to send new insets but a user is able to see
-                // how controls changes it's position from `0` to `nav bar height` padding.
-                // So just hide the controls to hide this visual inconsistency
-                hideControls(0, 0);
-            }
+            setControlsSize();
             fragmentListener.onFullscreenStateChanged(isFullscreen());
         }
 
@@ -820,7 +802,6 @@ public class VideoPlayerImpl extends VideoPlayer
 
         if (getCurrentState() != STATE_COMPLETED) {
             getControlsVisibilityHandler().removeCallbacksAndMessages(null);
-            showHideShadow(true, DEFAULT_CONTROLS_DURATION, 0);
             animateView(getControlsRoot(), true, DEFAULT_CONTROLS_DURATION, 0, () -> {
                 if (getCurrentState() == STATE_PLAYING && !isSomePopupMenuVisible()) {
                     if (v.getId() == playPauseButton.getId()) {
@@ -850,7 +831,7 @@ public class VideoPlayerImpl extends VideoPlayer
         buildQueue();
         updatePlaybackButtons();
 
-        hideControls(0, 0);
+        getControlsRoot().setVisibility(View.INVISIBLE);
         queueLayout.requestFocus();
         animateView(queueLayout, SLIDE_AND_ALPHA, true,
                 DEFAULT_CONTROLS_DURATION);
@@ -1281,6 +1262,20 @@ public class VideoPlayerImpl extends VideoPlayer
                     updatePopupSize(getPopupLayoutParams().width, -1);
                     checkPopupPositionBounds();
                 }
+
+                // The only situation I need to re-calculate elements sizes is
+                // when a user rotates a device from landscape to landscape
+                // because in that case the controls should be aligned to another side of a screen.
+                // The problem is when user leaves the app and returns back
+                // (while the app in landscape) Android reports via DisplayMetrics that orientation
+                // is portrait and it gives wrong sizes calculations.
+                // Let's skip re-calculation in every case but landscape
+                final boolean reportedOrientationIsLandscape = service.isLandscape();
+                final boolean actualOrientationIsLandscape = context.getResources()
+                        .getConfiguration().orientation == ORIENTATION_LANDSCAPE;
+                if (reportedOrientationIsLandscape && actualOrientationIsLandscape) {
+                    setControlsSize();
+                }
                 // Close it because when changing orientation from portrait
                 // (in fullscreen mode) the size of queue layout can be larger than the screen size
                 onQueueClosed();
@@ -1290,14 +1285,18 @@ public class VideoPlayerImpl extends VideoPlayer
                 // Interrupt playback only when screen turns on
                 // and user is watching video in popup player.
                 // Same actions for video player will be handled in ACTION_VIDEO_FRAGMENT_RESUMED
-                if (popupPlayerSelected() && (isPlaying() || isLoading())) {
+                if (backgroundPlaybackEnabled()
+                        && popupPlayerSelected()
+                        && (isPlaying() || isLoading())) {
                     useVideoSource(true);
                 }
                 break;
             case Intent.ACTION_SCREEN_OFF:
                 shouldUpdateOnProgress = false;
                 // Interrupt playback only when screen turns off with popup player working
-                if (popupPlayerSelected() && (isPlaying() || isLoading())) {
+                if (backgroundPlaybackEnabled()
+                        && popupPlayerSelected()
+                        && (isPlaying() || isLoading())) {
                     useVideoSource(false);
                 }
                 break;
@@ -1440,10 +1439,9 @@ public class VideoPlayerImpl extends VideoPlayer
         showOrHideButtons();
 
         getControlsVisibilityHandler().removeCallbacksAndMessages(null);
-        getControlsVisibilityHandler().postDelayed(() -> {
-                    showHideShadow(false, duration, 0);
-                    animateView(getControlsRoot(), false, duration, 0, this::hideSystemUIIfNeeded);
-                }, delay
+        getControlsVisibilityHandler().postDelayed(() ->
+                animateView(getControlsRoot(), false, duration, 0,
+                        this::hideSystemUIIfNeeded), delay
         );
     }
 
@@ -1471,17 +1469,11 @@ public class VideoPlayerImpl extends VideoPlayer
     }
 
     private void showSystemUIPartially() {
-        final AppCompatActivity activity = getParentActivity();
-        if (isFullscreen() && activity != null) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                activity.getWindow().setStatusBarColor(Color.TRANSPARENT);
-                activity.getWindow().setNavigationBarColor(Color.TRANSPARENT);
-            }
+        if (isFullscreen() && getParentActivity() != null) {
             final int visibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE
                     | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
                     | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION;
-            activity.getWindow().getDecorView().setSystemUiVisibility(visibility);
-            activity.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
+            getParentActivity().getWindow().getDecorView().setSystemUiVisibility(visibility);
         }
     }
 
@@ -1490,6 +1482,92 @@ public class VideoPlayerImpl extends VideoPlayer
         if (fragmentListener != null) {
             fragmentListener.hideSystemUiIfNeeded();
         }
+    }
+
+    /**
+     * Measures width and height of controls visible on screen.
+     * It ensures that controls will be side-by-side with NavigationBar and notches
+     * but not under them. Tablets have only bottom NavigationBar
+     */
+    public void setControlsSize() {
+        final Point size = new Point();
+        final Display display = getRootView().getDisplay();
+        if (display == null || !videoPlayerSelected()) {
+            return;
+        }
+        // This method will give a correct size of a usable area of a window.
+        // It doesn't include NavigationBar, notches, etc.
+        display.getSize(size);
+
+        final boolean isLandscape = service.isLandscape();
+        final int width = isFullscreen
+                ? (isLandscape ? size.x : size.y)
+                : ViewGroup.LayoutParams.MATCH_PARENT;
+        final int gravity = isFullscreen
+                ? (display.getRotation() == Surface.ROTATION_90
+                ? Gravity.START : Gravity.END)
+                : Gravity.TOP;
+
+        getTopControlsRoot().getLayoutParams().width = width;
+        final RelativeLayout.LayoutParams topParams =
+                ((RelativeLayout.LayoutParams) getTopControlsRoot().getLayoutParams());
+        topParams.removeRule(RelativeLayout.ALIGN_PARENT_START);
+        topParams.removeRule(RelativeLayout.ALIGN_PARENT_END);
+        topParams.addRule(gravity == Gravity.END
+                ? RelativeLayout.ALIGN_PARENT_END
+                : RelativeLayout.ALIGN_PARENT_START);
+        getTopControlsRoot().requestLayout();
+
+        getBottomControlsRoot().getLayoutParams().width = width;
+        final RelativeLayout.LayoutParams bottomParams =
+                ((RelativeLayout.LayoutParams) getBottomControlsRoot().getLayoutParams());
+        bottomParams.removeRule(RelativeLayout.ALIGN_PARENT_START);
+        bottomParams.removeRule(RelativeLayout.ALIGN_PARENT_END);
+        bottomParams.addRule(gravity == Gravity.END
+                ? RelativeLayout.ALIGN_PARENT_END
+                : RelativeLayout.ALIGN_PARENT_START);
+        getBottomControlsRoot().requestLayout();
+
+        final ViewGroup controlsRoot = getRootView().findViewById(R.id.playbackWindowRoot);
+        // In tablet navigationBar located at the bottom of the screen.
+        // And the situations when we need to set custom height is
+        // in fullscreen mode in tablet in non-multiWindow mode or with vertical video.
+        // Other than that MATCH_PARENT is good
+        final boolean navBarAtTheBottom = DeviceUtils.isTablet(service) || !isLandscape;
+        controlsRoot.getLayoutParams().height = isFullscreen && !isInMultiWindow()
+                && navBarAtTheBottom ? size.y : ViewGroup.LayoutParams.MATCH_PARENT;
+        controlsRoot.requestLayout();
+
+        final DisplayMetrics metrics = getRootView().getResources().getDisplayMetrics();
+        int topPadding = isFullscreen && !isInMultiWindow() ? getStatusBarHeight() : 0;
+        topPadding = !isLandscape && DeviceUtils.hasCutout(topPadding, metrics) ? 0 : topPadding;
+        getRootView().findViewById(R.id.playbackWindowRoot).setTranslationY(topPadding);
+        getBottomControlsRoot().setTranslationY(-topPadding);
+    }
+
+    /**
+     * @return statusBar height that was found inside system resources
+     * or default value if no value was provided inside resources
+     */
+    private int getStatusBarHeight() {
+        int statusBarHeight = 0;
+        final int resourceId = service.isLandscape()
+                ? service.getResources().getIdentifier(
+                "status_bar_height_landscape", "dimen", "android")
+                : service.getResources().getIdentifier(
+                "status_bar_height", "dimen", "android");
+
+        if (resourceId > 0) {
+            statusBarHeight = service.getResources().getDimensionPixelSize(resourceId);
+        }
+        if (statusBarHeight == 0) {
+            // Some devices provide wrong value for status bar height in landscape mode,
+            // this is workaround
+            final DisplayMetrics metrics = getRootView().getResources().getDisplayMetrics();
+            statusBarHeight = (int) TypedValue.applyDimension(
+                    TypedValue.COMPLEX_UNIT_DIP, 24, metrics);
+        }
+        return statusBarHeight;
     }
 
     protected void setMuteButton(final ImageButton button, final boolean isMuted) {
@@ -1534,6 +1612,8 @@ public class VideoPlayerImpl extends VideoPlayer
                 && !DeviceUtils.isTablet(service)) {
             toggleFullscreen();
         }
+
+        setControlsSize();
     }
 
     private void buildQueue() {
@@ -1930,12 +2010,6 @@ public class VideoPlayerImpl extends VideoPlayer
     public void setFragmentListener(final PlayerServiceEventListener listener) {
         fragmentListener = listener;
         fragmentIsVisible = true;
-        // Apply window insets because Android will not do it when orientation changes
-        // from landscape to portrait
-        if (!isFullscreen) {
-            getControlsRoot().setPadding(0, 0, 0, 0);
-        }
-        queueLayout.setPadding(0, 0, 0, 0);
         updateMetadata();
         updatePlayback();
         triggerProgressUpdate();
@@ -2106,9 +2180,5 @@ public class VideoPlayerImpl extends VideoPlayer
 
     public View getClosingOverlayView() {
         return closingOverlayView;
-    }
-
-    public boolean isVerticalVideo() {
-        return isVerticalVideo;
     }
 }

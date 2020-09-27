@@ -9,7 +9,6 @@ import android.view.View;
 import android.view.ViewConfiguration;
 import android.view.Window;
 import android.view.WindowManager;
-import android.widget.ProgressBar;
 import androidx.appcompat.content.res.AppCompatResources;
 import org.schabi.newpipe.R;
 import org.schabi.newpipe.player.BasePlayer;
@@ -265,18 +264,13 @@ public class PlayerGestureListener
             }
 
             final Window window = parent.getWindow();
-            final WindowManager.LayoutParams layoutParams = window.getAttributes();
-            final ProgressBar bar = playerImpl.getBrightnessProgressBar();
-            final float oldBrightness = layoutParams.screenBrightness;
-            bar.setProgress((int) (bar.getMax() * Math.max(0, Math.min(1, oldBrightness))));
-            bar.incrementProgressBy((int) distanceY);
 
-            final float currentProgressPercent = (float) bar.getProgress() / bar.getMax();
+            playerImpl.getBrightnessProgressBar().incrementProgressBy((int) distanceY);
+            final float currentProgressPercent = (float) playerImpl.getBrightnessProgressBar()
+                    .getProgress() / playerImpl.getMaxGestureLength();
+            final WindowManager.LayoutParams layoutParams = window.getAttributes();
             layoutParams.screenBrightness = currentProgressPercent;
             window.setAttributes(layoutParams);
-
-            // Save current brightness level
-            PlayerHelper.setScreenBrightness(parent, currentProgressPercent);
 
             if (DEBUG) {
                 Log.d(TAG, "onScroll().brightnessControl, "
