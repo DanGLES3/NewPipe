@@ -3,19 +3,19 @@ package org.schabi.newpipe.fragments.detail;
 import android.animation.ValueAnimator;
 import android.app.Activity;
 import android.content.BroadcastReceiver;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.ServiceConnection;
 import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
 import android.database.ContentObserver;
-import android.graphics.Color;
 import android.graphics.drawable.Drawable;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
-import android.os.Looper;
-import android.view.ViewTreeObserver;
+import android.os.IBinder;
 import androidx.core.text.HtmlCompat;
 import androidx.preference.PreferenceManager;
 import android.provider.Settings;
@@ -59,7 +59,6 @@ import com.nostra13.universalimageloader.core.assist.FailReason;
 import com.nostra13.universalimageloader.core.listener.ImageLoadingListener;
 import com.nostra13.universalimageloader.core.listener.SimpleImageLoadingListener;
 
-import org.schabi.newpipe.App;
 import org.schabi.newpipe.R;
 import org.schabi.newpipe.ReCaptchaActivity;
 import org.schabi.newpipe.download.DownloadDialog;
@@ -83,11 +82,12 @@ import org.schabi.newpipe.local.dialog.PlaylistAppendDialog;
 import org.schabi.newpipe.local.history.HistoryRecordManager;
 import org.schabi.newpipe.player.BasePlayer;
 import org.schabi.newpipe.player.MainPlayer;
+import org.schabi.newpipe.player.VideoPlayer;
 import org.schabi.newpipe.player.VideoPlayerImpl;
 import org.schabi.newpipe.player.event.OnKeyDownListener;
-import org.schabi.newpipe.player.event.PlayerServiceExtendedEventListener;
+import org.schabi.newpipe.player.event.PlayerEventListener;
+import org.schabi.newpipe.player.event.PlayerServiceEventListener;
 import org.schabi.newpipe.player.helper.PlayerHelper;
-import org.schabi.newpipe.player.helper.PlayerHolder;
 import org.schabi.newpipe.player.playqueue.PlayQueue;
 import org.schabi.newpipe.player.playqueue.PlayQueueItem;
 import org.schabi.newpipe.player.playqueue.SinglePlayQueue;
@@ -97,6 +97,7 @@ import org.schabi.newpipe.util.Constants;
 import org.schabi.newpipe.util.DeviceUtils;
 import org.schabi.newpipe.util.ExtractorHelper;
 import org.schabi.newpipe.util.ImageDisplayConstants;
+import org.schabi.newpipe.util.InfoCache;
 import org.schabi.newpipe.util.ListHelper;
 import org.schabi.newpipe.util.Localization;
 import org.schabi.newpipe.util.NavigationHelper;
@@ -106,6 +107,8 @@ import org.schabi.newpipe.util.ThemeHelper;
 import org.schabi.newpipe.views.AnimatedProgressBar;
 import org.schabi.newpipe.views.LargeTextMovementMethod;
 
+import java.io.Serializable;
+import java.util.Collection;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
@@ -132,7 +135,8 @@ public class VideoDetailFragment
         SharedPreferences.OnSharedPreferenceChangeListener,
         View.OnClickListener,
         View.OnLongClickListener,
-        PlayerServiceExtendedEventListener,
+        PlayerEventListener,
+        PlayerServiceEventListener,
         OnKeyDownListener {
     public static final String AUTO_PLAY = "auto_play";
 
@@ -154,6 +158,9 @@ public class VideoDetailFragment
     private static final String RELATED_TAB_TAG = "NEXT VIDEO";
     private static final String EMPTY_TAB_TAG = "EMPTY TAB";
 
+    private static final String INFO_KEY = "info_key";
+    private static final String STACK_KEY = "stack_key";
+
     private boolean showRelatedStreams;
     private boolean showComments;
     private String selectedTabTag;
@@ -166,13 +173,14 @@ public class VideoDetailFragment
     protected String name;
     @State
     protected String url;
-    protected static PlayQueue playQueue;
+    @State
+    protected PlayQueue playQueue;
     @State
     int bottomSheetState = BottomSheetBehavior.STATE_EXPANDED;
     @State
     protected boolean autoPlayEnabled = true;
 
-    private static StreamInfo currentInfo;
+    private StreamInfo currentInfo;
     private Disposable currentWorker;
     @NonNull
     private CompositeDisposable disposables = new CompositeDisposable();
@@ -241,6 +249,8 @@ public class VideoDetailFragment
     private FrameLayout relatedStreamsLayout;
 
     private ContentObserver settingsContentObserver;
+    private ServiceConnection serviceConnection;
+    private boolean bound;
     private MainPlayer playerService;
     private VideoPlayerImpl player;
 
@@ -248,56 +258,123 @@ public class VideoDetailFragment
     /*//////////////////////////////////////////////////////////////////////////
     // Service management
     //////////////////////////////////////////////////////////////////////////*/
-    @Override
-    public void onServiceConnected(final VideoPlayerImpl connectedPlayer,
-                                   final MainPlayer connectedPlayerService,
-                                   final boolean playAfterConnect) {
-        player = connectedPlayer;
-        playerService = connectedPlayerService;
 
-        // It will do nothing if the player is not in fullscreen mode
-        hideSystemUiIfNeeded();
+    private ServiceConnection getServiceConnection(final Context context,
+                                                   final boolean playAfterConnect) {
+        return new ServiceConnection() {
+            @Override
+            public void onServiceDisconnected(final ComponentName compName) {
+                if (DEBUG) {
+                    Log.d(TAG, "Player service is disconnected");
+                }
 
-        if (!player.videoPlayerSelected() && !playAfterConnect) {
-            return;
+                unbind(context);
+            }
+
+            @Override
+            public void onServiceConnected(final ComponentName compName, final IBinder service) {
+                if (DEBUG) {
+                    Log.d(TAG, "Player service is connected");
+                }
+                final MainPlayer.LocalBinder localBinder = (MainPlayer.LocalBinder) service;
+
+                playerService = localBinder.getService();
+                player = localBinder.getPlayer();
+
+                startPlayerListener();
+
+                // It will do nothing if the player is not in fullscreen mode
+                hideSystemUiIfNeeded();
+
+                if (!player.videoPlayerSelected() && !playAfterConnect) {
+                    return;
+                }
+
+                if (playerIsNotStopped() && player.videoPlayerSelected()) {
+                    addVideoPlayerView();
+                }
+
+                if (isLandscape()) {
+                    // If the video is playing but orientation changed
+                    // let's make the video in fullscreen again
+                    checkLandscape();
+                } else if (player.isFullscreen()) {
+                    // Device is in portrait orientation after rotation but UI is in fullscreen.
+                    // Return back to non-fullscreen state
+                    player.toggleFullscreen();
+                }
+
+                if (playAfterConnect
+                        || (currentInfo != null
+                        && isAutoplayEnabled()
+                        && player.getParentActivity() == null)) {
+                    openVideoPlayer();
+                }
+            }
+        };
+    }
+
+    private void bind(final Context context) {
+        if (DEBUG) {
+            Log.d(TAG, "bind() called");
         }
 
-        if (isLandscape()) {
-            // If the video is playing but orientation changed
-            // let's make the video in fullscreen again
-            checkLandscape();
-        } else if (player.isFullscreen() && !player.isVerticalVideo()) {
-            // Device is in portrait orientation after rotation but UI is in fullscreen.
-            // Return back to non-fullscreen state
-            player.toggleFullscreen();
-        }
-
-        if (playerIsNotStopped() && player.videoPlayerSelected()) {
-            addVideoPlayerView();
-        }
-
-        if (playAfterConnect
-                || (currentInfo != null
-                && isAutoplayEnabled()
-                && player.getParentActivity() == null)) {
-            openVideoPlayer();
+        final Intent serviceIntent = new Intent(context, MainPlayer.class);
+        bound = context.bindService(serviceIntent, serviceConnection, Context.BIND_AUTO_CREATE);
+        if (!bound) {
+            context.unbindService(serviceConnection);
         }
     }
 
-    @Override
-    public void onServiceDisconnected() {
-        playerService = null;
-        player = null;
-        restoreDefaultBrightness();
+    private void unbind(final Context context) {
+        if (DEBUG) {
+            Log.d(TAG, "unbind() called");
+        }
+
+        if (bound) {
+            context.unbindService(serviceConnection);
+            bound = false;
+            stopPlayerListener();
+            playerService = null;
+            player = null;
+            saveCurrentAndRestoreDefaultBrightness();
+        }
+    }
+
+    private void startPlayerListener() {
+        if (player != null) {
+            player.setFragmentListener(this);
+        }
+    }
+
+    private void stopPlayerListener() {
+        if (player != null) {
+            player.removeFragmentListener(this);
+        }
+    }
+
+    private void startService(final Context context, final boolean playAfterConnect) {
+        // startService() can be called concurrently and it will give a random crashes
+        // and NullPointerExceptions inside the service because the service will be
+        // bound twice. Prevent it with unbinding first
+        unbind(context);
+        context.startService(new Intent(context, MainPlayer.class));
+        serviceConnection = getServiceConnection(context, playAfterConnect);
+        bind(context);
+    }
+
+    private void stopService(final Context context) {
+        unbind(context);
+        context.stopService(new Intent(context, MainPlayer.class));
     }
 
 
     /*////////////////////////////////////////////////////////////////////////*/
 
     public static VideoDetailFragment getInstance(final int serviceId, final String videoUrl,
-                                                  final String name, final PlayQueue queue) {
+                                                  final String name, final PlayQueue playQueue) {
         final VideoDetailFragment instance = new VideoDetailFragment();
-        instance.setInitialData(serviceId, videoUrl, name, queue);
+        instance.setInitialData(serviceId, videoUrl, name, playQueue);
         return instance;
     }
 
@@ -349,7 +426,7 @@ public class VideoDetailFragment
         if (currentWorker != null) {
             currentWorker.dispose();
         }
-        restoreDefaultBrightness();
+        saveCurrentAndRestoreDefaultBrightness();
         PreferenceManager.getDefaultSharedPreferences(requireContext())
                 .edit()
                 .putString(getString(R.string.stream_info_selected_tab_key),
@@ -400,9 +477,9 @@ public class VideoDetailFragment
         // Stop the service when user leaves the app with double back press
         // if video player is selected. Otherwise unbind
         if (activity.isFinishing() && player != null && player.videoPlayerSelected()) {
-            PlayerHolder.stopService(App.getApp());
+            stopService(requireContext());
         } else {
-            PlayerHolder.removeListener();
+            unbind(requireContext());
         }
 
         PreferenceManager.getDefaultSharedPreferences(activity)
@@ -420,12 +497,6 @@ public class VideoDetailFragment
         positionSubscriber = null;
         currentWorker = null;
         bottomSheetBehavior.setBottomSheetCallback(null);
-
-        if (activity.isFinishing()) {
-            playQueue = null;
-            currentInfo = null;
-            stack = new LinkedList<>();
-        }
     }
 
     @Override
@@ -456,6 +527,42 @@ public class VideoDetailFragment
             showComments = sharedPreferences.getBoolean(key, true);
             updateFlags |= COMMENTS_UPDATE_FLAG;
         }
+    }
+
+    /*//////////////////////////////////////////////////////////////////////////
+    // State Saving
+    //////////////////////////////////////////////////////////////////////////*/
+
+    @Override
+    public void onSaveInstanceState(final Bundle outState) {
+        super.onSaveInstanceState(outState);
+
+        if (!isLoading.get() && currentInfo != null && isVisible()) {
+            outState.putSerializable(INFO_KEY, currentInfo);
+        }
+
+        if (playQueue != null) {
+            outState.putSerializable(VideoPlayer.PLAY_QUEUE_KEY, playQueue);
+        }
+        outState.putSerializable(STACK_KEY, stack);
+    }
+
+    @Override
+    protected void onRestoreInstanceState(@NonNull final Bundle savedState) {
+        super.onRestoreInstanceState(savedState);
+
+        Serializable serializable = savedState.getSerializable(INFO_KEY);
+        if (serializable instanceof StreamInfo) {
+            currentInfo = (StreamInfo) serializable;
+            InfoCache.getInstance().putInfo(serviceId, url, currentInfo, InfoItem.InfoType.STREAM);
+        }
+
+        serializable = savedState.getSerializable(STACK_KEY);
+        if (serializable instanceof Collection) {
+            //noinspection unchecked
+            stack.addAll((Collection<? extends StackItem>) serializable);
+        }
+        playQueue = (PlayQueue) savedState.getSerializable(VideoPlayer.PLAY_QUEUE_KEY);
     }
 
     /*//////////////////////////////////////////////////////////////////////////
@@ -652,6 +759,8 @@ public class VideoDetailFragment
 
         relatedStreamsLayout = rootView.findViewById(R.id.relatedStreamsLayout);
 
+        setHeightThumbnail();
+
         thumbnailBackgroundButton.requestFocus();
 
         if (DeviceUtils.isTv(getContext())) {
@@ -697,11 +806,7 @@ public class VideoDetailFragment
         detailControlsPopup.setOnTouchListener(getOnControlsTouchListener());
 
         setupBottomPlayer();
-        if (!PlayerHolder.bound) {
-            setHeightThumbnail();
-        } else {
-            PlayerHolder.startService(App.getApp(), false, this);
-        }
+        startService(requireContext(), false);
     }
 
     private View.OnTouchListener getOnControlsTouchListener() {
@@ -756,7 +861,7 @@ public class VideoDetailFragment
      * Stack that contains the "navigation history".<br>
      * The peek is the current video.
      */
-    private static LinkedList<StackItem> stack = new LinkedList<>();
+    protected final LinkedList<StackItem> stack = new LinkedList<>();
 
     @Override
     public boolean onKeyDown(final int keyCode) {
@@ -840,7 +945,7 @@ public class VideoDetailFragment
         if (currentInfo == null) {
             prepareAndLoadInfo();
         } else {
-            prepareAndHandleInfoIfNeededAfterDelay(currentInfo, false, 50);
+            prepareAndHandleInfo(currentInfo, false);
         }
     }
 
@@ -854,21 +959,6 @@ public class VideoDetailFragment
         }
         setInitialData(sid, videoUrl, title, queue);
         startLoading(false, true);
-    }
-
-    private void prepareAndHandleInfoIfNeededAfterDelay(final StreamInfo info,
-                                                        final boolean scrollToTop,
-                                                        final long delay) {
-        new Handler(Looper.getMainLooper()).postDelayed(() -> {
-            if (activity == null) {
-                return;
-            }
-            // Data can already be drawn, don't spend time twice
-            if (info.getName().equals(videoTitleTextView.getText().toString())) {
-                return;
-            }
-            prepareAndHandleInfo(info, scrollToTop);
-        }, delay);
     }
 
     private void prepareAndHandleInfo(final StreamInfo info, final boolean scrollToTop) {
@@ -1030,8 +1120,8 @@ public class VideoDetailFragment
         }
 
         // See UI changes while remote playQueue changes
-        if (player == null) {
-            PlayerHolder.startService(App.getApp(), false, this);
+        if (!bound) {
+            startService(requireContext(), false);
         }
 
         //  If a user watched video inside fullscreen mode and than chose another player
@@ -1060,8 +1150,8 @@ public class VideoDetailFragment
 
     private void openNormalBackgroundPlayer(final boolean append) {
         // See UI changes while remote playQueue changes
-        if (player == null) {
-            PlayerHolder.startService(App.getApp(), false, this);
+        if (!bound) {
+            startService(requireContext(), false);
         }
 
         final PlayQueue queue = setupPlayQueueForIntent(append);
@@ -1075,7 +1165,7 @@ public class VideoDetailFragment
 
     private void openMainPlayer() {
         if (playerService == null) {
-            PlayerHolder.startService(App.getApp(), true, this);
+            startService(requireContext(), true);
             return;
         }
         if (currentInfo == null) {
@@ -1180,7 +1270,7 @@ public class VideoDetailFragment
 
         // Check if viewHolder already contains a child
         if (player.getRootView().getParent() != playerPlaceholder) {
-            playerService.removeViewFromParent();
+            removeVideoPlayerView();
         }
         setHeightThumbnail();
 
@@ -1236,23 +1326,6 @@ public class VideoDetailFragment
         }
     }
 
-    private final ViewTreeObserver.OnPreDrawListener preDrawListener =
-            new ViewTreeObserver.OnPreDrawListener() {
-                @Override
-                public boolean onPreDraw() {
-                    final DisplayMetrics metrics = getResources().getDisplayMetrics();
-
-                    if (getView() != null) {
-                        final int height = isInMultiWindow()
-                                ? requireView().getHeight()
-                                : activity.getWindow().getDecorView().getHeight();
-                        setHeightThumbnail(height, metrics);
-                        getView().getViewTreeObserver().removeOnPreDrawListener(preDrawListener);
-                    }
-                    return false;
-                }
-            };
-
     /**
      * Method which controls the size of thumbnail and the size of main player inside
      * a layout with thumbnail. It decides what height the player should have in both
@@ -1263,35 +1336,24 @@ public class VideoDetailFragment
     private void setHeightThumbnail() {
         final DisplayMetrics metrics = getResources().getDisplayMetrics();
         final boolean isPortrait = metrics.heightPixels > metrics.widthPixels;
-        requireView().getViewTreeObserver().removeOnPreDrawListener(preDrawListener);
 
+        final int height;
         if (player != null && player.isFullscreen()) {
-            final int height = isInMultiWindow()
+            height = isInMultiWindow()
                     ? requireView().getHeight()
                     : activity.getWindow().getDecorView().getHeight();
-            // Height is zero when the view is not yet displayed like after orientation change
-            if (height != 0) {
-                setHeightThumbnail(height, metrics);
-            } else {
-                requireView().getViewTreeObserver().addOnPreDrawListener(preDrawListener);
-            }
         } else {
-            final int height = isPortrait
+            height = isPortrait
                     ? (int) (metrics.widthPixels / (16.0f / 9.0f))
                     : (int) (metrics.heightPixels / 2.0f);
-            setHeightThumbnail(height, metrics);
         }
-    }
 
-    private void setHeightThumbnail(final int newHeight, final DisplayMetrics metrics) {
         thumbnailImageView.setLayoutParams(
-                new FrameLayout.LayoutParams(
-                        RelativeLayout.LayoutParams.MATCH_PARENT, newHeight));
-        thumbnailImageView.setMinimumHeight(newHeight);
+                new FrameLayout.LayoutParams(RelativeLayout.LayoutParams.MATCH_PARENT, height));
+        thumbnailImageView.setMinimumHeight(height);
         if (player != null) {
             final int maxHeight = (int) (metrics.heightPixels * MAX_PLAYER_HEIGHT);
-            player.getSurfaceView()
-                    .setHeights(newHeight, player.isFullscreen() ? newHeight : maxHeight);
+            player.getSurfaceView().setHeights(height, player.isFullscreen() ? height : maxHeight);
         }
     }
 
@@ -1813,26 +1875,23 @@ public class VideoDetailFragment
         currentInfo = info;
         setInitialData(info.getServiceId(), info.getUrl(), info.getName(), queue);
         setAutoplay(false);
-        // Delay execution just because it freezes the main thread, and while playing
-        // next/previous video you see visual glitches
-        // (when non-vertical video goes after vertical video)
-        prepareAndHandleInfoIfNeededAfterDelay(info, true, 200);
+        prepareAndHandleInfo(info, true);
     }
 
     @Override
     public void onPlayerError(final ExoPlaybackException error) {
         if (error.type == ExoPlaybackException.TYPE_SOURCE
                 || error.type == ExoPlaybackException.TYPE_UNEXPECTED) {
-            // Properly exit from fullscreen
+            hideMainPlayer();
             if (playerService != null && player.isFullscreen()) {
                 player.toggleFullscreen();
             }
-            hideMainPlayer();
         }
     }
 
     @Override
     public void onServiceStopped() {
+        unbind(requireContext());
         setOverlayPlayPauseImage();
         if (currentInfo != null) {
             updateOverlayData(currentInfo.getName(),
@@ -1924,11 +1983,7 @@ public class VideoDetailFragment
                     WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT;
         }
         activity.getWindow().getDecorView().setSystemUiVisibility(0);
-        activity.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            activity.getWindow().setStatusBarColor(ThemeHelper.resolveColorFromAttr(
-                    requireContext(), android.R.attr.colorPrimary));
-        }
+        activity.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
     }
 
     private void hideSystemUi() {
@@ -1943,26 +1998,18 @@ public class VideoDetailFragment
         // Prevent jumping of the player on devices with cutout
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             activity.getWindow().getAttributes().layoutInDisplayCutoutMode =
-                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_NEVER;
         }
-        int visibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+        final int visibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE
                 | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
                 | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                | View.SYSTEM_UI_FLAG_FULLSCREEN
                 | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
                 | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY;
-        // In multiWindow mode status bar is not transparent for devices with cutout
-        // if I include this flag. So without it is better in this case
-        if (!isInMultiWindow()) {
-            visibility |= View.SYSTEM_UI_FLAG_FULLSCREEN;
-        }
         activity.getWindow().getDecorView().setSystemUiVisibility(visibility);
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP
-                && (isInMultiWindow() || (player != null && player.isFullscreen()))) {
-            activity.getWindow().setStatusBarColor(Color.TRANSPARENT);
-            activity.getWindow().setNavigationBarColor(Color.TRANSPARENT);
-        }
-        activity.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        activity.getWindow().setFlags(
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
     }
 
     // Listener implementation
@@ -1980,11 +2027,13 @@ public class VideoDetailFragment
                 && player.getPlayer().getPlaybackState() != Player.STATE_IDLE;
     }
 
-    private void restoreDefaultBrightness() {
+    private void saveCurrentAndRestoreDefaultBrightness() {
         final WindowManager.LayoutParams lp = activity.getWindow().getAttributes();
         if (lp.screenBrightness == -1) {
             return;
         }
+        // Save current brightness level
+        PlayerHelper.setScreenBrightness(activity, lp.screenBrightness);
 
         // Restore the old  brightness when fragment.onPause() called or
         // when a player is in portrait
@@ -2003,7 +2052,7 @@ public class VideoDetailFragment
                 || !player.isFullscreen()
                 || bottomSheetState != BottomSheetBehavior.STATE_EXPANDED) {
             // Apply system brightness when the player is not in fullscreen
-            restoreDefaultBrightness();
+            saveCurrentAndRestoreDefaultBrightness();
         } else {
             // Restore already saved brightness level
             final float brightnessLevel = PlayerHelper.getScreenBrightness(activity);
@@ -2026,6 +2075,7 @@ public class VideoDetailFragment
         // Let's give a user time to look at video information page if video is not playing
         if (orientationLocked && !player.isPlaying()) {
             player.onPlay();
+            player.showControlsThenHide();
         }
     }
 
@@ -2117,7 +2167,7 @@ public class VideoDetailFragment
         if (currentWorker != null) {
             currentWorker.dispose();
         }
-        PlayerHolder.stopService(App.getApp());
+        stopService(requireContext());
         setInitialData(0, null, "", null);
         currentInfo = null;
         updateOverlayData(null, null, null);
@@ -2228,7 +2278,6 @@ public class VideoDetailFragment
                                 && player.videoPlayerSelected()) {
                             player.toggleFullscreen();
                         }
-                        setOverlayLook(appBarLayout, behavior, 1);
                         break;
                     case BottomSheetBehavior.STATE_COLLAPSED:
                         moveFocusToMainFragment(true);
@@ -2238,7 +2287,6 @@ public class VideoDetailFragment
                         if (player != null) {
                             player.onQueueClosed();
                         }
-                        setOverlayLook(appBarLayout, behavior, 0);
                         break;
                     case BottomSheetBehavior.STATE_DRAGGING:
                     case BottomSheetBehavior.STATE_SETTLING:
