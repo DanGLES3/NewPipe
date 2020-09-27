@@ -180,6 +180,8 @@ public abstract class BasePlayer implements
     @NonNull
     protected final HistoryRecordManager recordManager;
     @NonNull
+    protected final SharedPreferences sharedPreferences;
+    @NonNull
     protected final CustomTrackSelector trackSelector;
     @NonNull
     protected final PlayerDataSource dataSource;
@@ -211,6 +213,7 @@ public abstract class BasePlayer implements
         setupBroadcastReceiver(intentFilter);
 
         this.recordManager = new HistoryRecordManager(context);
+        this.sharedPreferences = PreferenceManager.getDefaultSharedPreferences(context);
 
         this.progressUpdateReactor = new SerialDisposable();
         this.databaseUpdateReactor = new CompositeDisposable();
@@ -497,12 +500,19 @@ public abstract class BasePlayer implements
     @Override
     public void onLoadingComplete(final String imageUri, final View view,
                                   final Bitmap loadedImage) {
+        final float width = Math.min(
+                context.getResources().getDimension(R.dimen.player_notification_thumbnail_width),
+                loadedImage.getWidth());
+        currentThumbnail = Bitmap.createScaledBitmap(loadedImage,
+                (int) width,
+                (int) (loadedImage.getHeight() / (loadedImage.getWidth() / width)), true);
         if (DEBUG) {
             Log.d(TAG, "Thumbnail - onLoadingComplete() called with: "
                     + "imageUri = [" + imageUri + "], view = [" + view + "], "
-                    + "loadedImage = [" + loadedImage + "]");
+                    + "loadedImage = [" + loadedImage + "], "
+                    + loadedImage.getWidth() + "x" + loadedImage.getHeight()
+            + ", scaled width = " + width);
         }
-        currentThumbnail = loadedImage;
     }
 
     @Override
@@ -1239,7 +1249,15 @@ public abstract class BasePlayer implements
             Log.d(TAG, "seekBy() called with: position = [" + positionMillis + "]");
         }
         if (simpleExoPlayer != null) {
-            simpleExoPlayer.seekTo(positionMillis);
+            // prevent invalid positions when fast-forwarding/-rewinding
+            long normalizedPositionMillis = positionMillis;
+            if (normalizedPositionMillis < 0) {
+                normalizedPositionMillis = 0;
+            } else if (normalizedPositionMillis > simpleExoPlayer.getDuration()) {
+                normalizedPositionMillis = simpleExoPlayer.getDuration();
+            }
+
+            simpleExoPlayer.seekTo(normalizedPositionMillis);
         }
     }
 
@@ -1408,6 +1426,11 @@ public abstract class BasePlayer implements
     @Nullable
     public MediaSourceTag getCurrentMetadata() {
         return currentMetadata;
+    }
+
+    @NonNull
+    public LoadController getLoadController() {
+        return (LoadController) loadControl;
     }
 
     @NonNull
